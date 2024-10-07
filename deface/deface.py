@@ -4,7 +4,7 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List, Any
 
 import tqdm
 import skimage.draw
@@ -14,7 +14,6 @@ import imageio.v2 as iio
 import imageio.plugins.ffmpeg
 import cv2
 
-from deface import __version__
 from deface.centerface import CenterFace
 
 
@@ -133,7 +132,7 @@ def group_det_by_overlap(dets):
     return groups
 
 
-def filter_dets(groups):
+def get_group_centeroid(groups):
     new_dets = []
     # The box of a group has centroid of mean centroids and
     # and the width, height and score are the max of all boxes in the group
@@ -164,6 +163,38 @@ def filter_dets(groups):
 
             new_dets.append([group_x1, group_y1, group_x2, group_y2, group_score])
     return np.asarray(new_dets, dtype=np.float32)
+
+
+def filter_dets_by_cache(dets, cache, overlap_threshold):
+    # Make cache of the last 5 frames
+    # make overlapping groups for each time step.
+    # If a new detection overlap any group in previous time step at least overlap_threshold times,
+    #  it means the detection is reliable.
+    # annonymize the detections that are reliable.
+    # Add a new detection to cache, remove the old frame (-6th) cache
+
+    reliables = []
+    for det in dets:
+        overlap_counter = 0
+        for step_cache in cache[-5:]:
+            for group in step_cache:
+                if has_overlap_with_group(det, group):
+                    overlap_counter += 1
+                    break
+        if overlap_counter >= overlap_threshold:
+            reliables.append(det)
+    cached_dets = np.asarray(reliables, dtype=np.float32)
+
+    # Add new dets to cache
+    cached_groups = group_det_by_overlap(dets)
+    cache.append(cached_groups)
+
+    # Filter cached_dets here, make detections into group of overlapping rectangles
+    groups = group_det_by_overlap(cached_dets)
+    # Get the mean centeroid and max w,h and create one rectangle per group from those numbers.
+    new_dets = get_group_centeroid(groups)
+
+    return new_dets, cache[-5:]
 
 
 def video_detect(
@@ -237,41 +268,16 @@ def video_detect(
     iter_idx = 0
     frame_cache: List[Any] = []
     for frame in read_iter:
-        if not thresholds_by_sec:
-            temp_threshold = threshold
-        elif iter_idx in threshold_by_frame_idx:
+        temp_threshold = threshold
+        if thresholds_by_sec and iter_idx in threshold_by_frame_idx:
             temp_threshold = threshold_by_frame_idx[iter_idx]
         iter_idx += 1
         # Perform network inference, get bb dets but discard landmark predictions
         dets, _ = centerface(frame, threshold=temp_threshold)
 
-        # Make cache of the last 5 frames
-        # make overlapping groups for each time step.
-        # If a new det overlap any group in previous time step at least 2 times,
-        #  it means the detection is reliable.
-        # annonymize det that are reliable.
-        # Add a new dets to cache, remove the old frame (-6th) cache
-
-        reliables = []
-        for det in dets:
-            overlap_counter = 0
-            for step_cache in frame_cache[-5:]:
-                for group in step_cache:
-                    if has_overlap_with_group(det, group):
-                        overlap_counter += 1
-                        break
-            if overlap_counter >= overlap_threshold:
-                reliables.append(det)
-        cached_dets = np.asarray(reliables, dtype=np.float32)
-
-        # Add new dets to cache
-        cached_groups = group_det_by_overlap(dets)
-        frame_cache.append(cached_groups)
-
-        # Filter cached_dets here, make dets into group of overlapping rectangles
-        # Get the mean centeroid and max w,h and create one rectangle per group from those numbers.
-        groups = group_det_by_overlap(cached_dets)
-        new_dets = filter_dets(groups)
+        new_dets, frame_cache = filter_dets_by_cache(
+            dets, frame_cache, overlap_threshold
+        )
 
         anonymize_frame(
             dets, frame, mask_scale=mask_scale,
@@ -479,7 +485,6 @@ def main():
             # or an invalid path. The latter two cases are handled below.
             ipaths.append(path)
 
-    
     base_opath = args.output
     replacewith = args.replacewith
     enable_preview = args.preview
