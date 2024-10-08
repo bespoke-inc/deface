@@ -144,7 +144,7 @@ class TestDeface(unittest.TestCase):
                 centeroid_1
                 == np.asarray(
                     [
-                        [100, 100, 210, 210, 0.5],
+                        [102, 102, 200, 200, 0.5],
                         [500, 500, 700, 700, 0.25],
                     ],
                     dtype=np.float32,
@@ -168,7 +168,7 @@ class TestDeface(unittest.TestCase):
         )
         self.assertTrue(
             (
-                centeroid_3 == np.asarray([[0, 0, 200, 200, 0.5]], dtype=np.float32)
+                centeroid_3 == np.asarray([[25, 25, 175, 175, 0.5]], dtype=np.float32)
             ).all(),
             "incorrect centeroid calculation",
         )

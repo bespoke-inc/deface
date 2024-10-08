@@ -134,7 +134,7 @@ def group_det_by_overlap(dets):
 
 def get_group_centeroid(groups):
     new_dets = []
-    # The box of a group has centroid of mean centroids and
+    # The box of a group has centroid of weighted average centroids (by area) and
     # and the width, height and score are the max of all boxes in the group
     for group in groups:
         if not group:
@@ -146,19 +146,23 @@ def get_group_centeroid(groups):
             y1s = [x[1] for x in group]
             x2s = [x[2] for x in group]
             y2s = [x[3] for x in group]
-            max_w = max([x2 - x1 for x2, x1 in zip(x2s, x1s)])
-            max_h = max([y2 - y1 for y2, y1 in zip(y2s, y1s)])
-            x_centroid = np.floor(
-                np.mean([np.floor((x1 + x2) / 2) for x1, x2 in zip(x1s, x2s)])
-            )
-            y_centroid = np.floor(
-                np.mean([np.floor((y1 + y2) / 2) for y1, y2 in zip(y1s, y2s)])
-            )
 
-            group_x1 = min([min(x1s), np.floor(x_centroid - max_w / 2)])
-            group_y1 = min([min(y1s), np.floor(y_centroid - max_h / 2)])
-            group_x2 = max([max(x2s), np.floor(x_centroid + max_w / 2)])
-            group_y2 = max([max(y2s), np.floor(y_centroid + max_h / 2)])
+            widths = [x2 - x1 for x2, x1 in zip(x2s, x1s)]
+            heights = [y2 - y1 for y2, y1 in zip(y2s, y1s)]
+
+            areas = [w * h for w, h in zip(widths, heights)]
+            max_w = max(widths)
+            max_h = max(heights)
+
+            x_centroids = [np.rint((x1 + x2) / 2) for x1, x2 in zip(x1s, x2s)]
+            y_centroids = [np.rint((y1 + y2) / 2) for y1, y2 in zip(y1s, y2s)]
+            group_x_centroid = np.average(x_centroids, weights=areas)
+            group_y_centroid = np.average(y_centroids, weights=areas)
+
+            group_x1 = max([min(x1s), np.floor(group_x_centroid - max_w / 2)])
+            group_y1 = max([min(y1s), np.floor(group_y_centroid - max_h / 2)])
+            group_x2 = min([max(x2s), np.floor(group_x_centroid + max_w / 2)])
+            group_y2 = min([max(y2s), np.floor(group_y_centroid + max_h / 2)])
             group_score = max([x[4] for x in group])
 
             new_dets.append([group_x1, group_y1, group_x2, group_y2, group_score])
@@ -191,7 +195,7 @@ def filter_dets_by_cache(dets, cache, overlap_threshold):
 
     # Filter cached_dets here, make detections into group of overlapping rectangles
     groups = group_det_by_overlap(cached_dets)
-    # Get the mean centeroid and max w,h and create one rectangle per group from those numbers.
+    # Get the weighted average centeroid and max w,h and create one rectangle per group from those numbers.
     new_dets = get_group_centeroid(groups)
 
     return new_dets, cache[-5:]
@@ -267,8 +271,8 @@ def video_detect(
 
     iter_idx = 0
     frame_cache: List[Any] = []
+    temp_threshold = default_threshold
     for frame in read_iter:
-        temp_threshold = threshold
         if thresholds_by_sec and iter_idx in threshold_by_frame_idx:
             temp_threshold = threshold_by_frame_idx[iter_idx]
         iter_idx += 1
