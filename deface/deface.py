@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 from typing import Dict, Tuple, Optional, List, Any
+from ast import literal_eval
 
 import tqdm
 import skimage.draw
@@ -170,17 +171,17 @@ def get_group_centeroid(groups):
 
 
 def filter_dets_by_cache(dets, cache, overlap_threshold):
-    # Make cache of the last 5 frames
+    # Make cache of the last frames
     # make overlapping groups for each time step.
     # If a new detection overlap any group in previous time step at least overlap_threshold times,
     #  it means the detection is reliable.
     # annonymize the detections that are reliable.
-    # Add a new detection to cache, remove the old frame (-6th) cache
+    # Add a new detection to cache
 
     reliables = []
     for det in dets:
         overlap_counter = 0
-        for step_cache in cache[-5:]:
+        for step_cache in cache:
             for group in step_cache:
                 if has_overlap_with_group(det, group):
                     overlap_counter += 1
@@ -198,7 +199,7 @@ def filter_dets_by_cache(dets, cache, overlap_threshold):
     # Get the weighted average centeroid and max w,h and create one rectangle per group from those numbers.
     new_dets = get_group_centeroid(groups)
 
-    return new_dets, cache[-5:]
+    return new_dets, cache
 
 
 def video_detect(
@@ -279,8 +280,9 @@ def video_detect(
         # Perform network inference, get bb dets but discard landmark predictions
         dets, _ = centerface(frame, threshold=temp_threshold)
 
+        # Use cache of the last 5 frames
         new_dets, frame_cache = filter_dets_by_cache(
-            dets, frame_cache, overlap_threshold
+            dets, frame_cache[-5:], overlap_threshold
         )
 
         anonymize_frame(
@@ -445,10 +447,9 @@ def parse_cli_args():
     parser.add_argument(
         "--thresholds_by_sec",
         "-tbs",
-        default={},
-        type=dict,
+        default="{}",
         metavar="TBS",
-        help="A dictionary of desired threshold by seconds (for videos only)",
+        help="A json string (dictionary) of desired threshold by seconds (for videos only). i.e: '{1: 0.5, 5: 0.7}'",
     )
     parser.add_argument(
         "--overlap_threshold",
@@ -504,7 +505,7 @@ def main():
     mosaicsize = args.mosaicsize
     keep_metadata = args.keep_metadata
     replaceimg = None
-    thresholds_by_sec = args.thresholds_by_sec
+    thresholds_by_sec = literal_eval(args.thresholds_by_sec)
     overlap_threshold = args.overlap_threshold
 
     if in_shape is not None:
