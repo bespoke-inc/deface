@@ -4,7 +4,7 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import tqdm
 import skimage.draw
@@ -102,6 +102,70 @@ def cam_read_iter(reader):
         yield reader.get_next_data()
 
 
+def has_overlap(det, other):
+    # In openCV the coordinator start at the top left corner of the image
+    x1, y1, x2, y2, _ = det
+    X1, Y1, X2, Y2, _ = other
+    h_overlaps = (x1 <= X2) and (x2 >= X1)
+    v_overlaps = (y1 <= Y2) and (y2 >= Y1)
+    return h_overlaps and v_overlaps
+
+
+def has_overlap_with_group(det, group):
+    for other in group:
+        if has_overlap(det, other):
+            return True
+    return False
+
+
+def group_det_by_overlap(dets):
+    groups = [[]]
+    ordered_dets = sorted(dets, key=lambda x: (x[0], x[1]))
+    # add to groups the det that have overlap with others
+    for det in ordered_dets:
+        if not groups[-1]:
+            groups[-1].append(det)
+            continue
+        if has_overlap_with_group(det, groups[-1]):
+            groups[-1].append(det)
+        else:
+            groups.append([det])
+    return groups
+
+
+def filter_dets(groups):
+    new_dets = []
+    # The box of a group has centroid of mean centroids and
+    # and the width, height and score are the max of all boxes in the group
+    for group in groups:
+        if not group:
+            continue
+        elif len(group) == 1:
+            new_dets.append(group[0])
+        else:
+            x1s = [x[0] for x in group]
+            y1s = [x[1] for x in group]
+            x2s = [x[2] for x in group]
+            y2s = [x[3] for x in group]
+            max_w = max([x2 - x1 for x2, x1 in zip(x2s, x1s)])
+            max_h = max([y2 - y1 for y2, y1 in zip(y2s, y1s)])
+            x_centroid = np.floor(
+                np.mean([np.floor((x1 + x2) / 2) for x1, x2 in zip(x1s, x2s)])
+            )
+            y_centroid = np.floor(
+                np.mean([np.floor((y1 + y2) / 2) for y1, y2 in zip(y1s, y2s)])
+            )
+
+            group_x1 = min([min(x1s), np.floor(x_centroid - max_w / 2)])
+            group_y1 = min([min(y1s), np.floor(y_centroid - max_h / 2)])
+            group_x2 = max([max(x2s), np.floor(x_centroid + max_w / 2)])
+            group_y2 = max([max(y2s), np.floor(y_centroid + max_h / 2)])
+            group_score = max([x[4] for x in group])
+
+            new_dets.append([group_x1, group_y1, group_x2, group_y2, group_score])
+    return np.asarray(new_dets, dtype=np.float32)
+
+
 def video_detect(
         ipath: str,
         opath: str,
@@ -118,15 +182,19 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
+        thresholds_by_sec: Optional[Dict[float, float]] = None,
+        overlap_threshold: int = 2,
 ):
+    reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader
     try:
         if 'fps' in ffmpeg_config:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])
+            reader = imageio.get_reader(ipath, fps=ffmpeg_config["fps"])  # type: ignore
         else:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath)
+            reader = imageio.get_reader(ipath)  # type: ignore
 
         meta = reader.get_meta_data()
         _ = meta['size']
+        fps = meta["fps"]
     except:
         if cam:
             print(f'Could not find video device {ipath}. Please set a valid input.')
@@ -153,13 +221,57 @@ def video_detect(
         if keep_audio and meta.get('audio_codec'):
             _ffmpeg_config.setdefault('audio_path', ipath)
             _ffmpeg_config.setdefault('audio_codec', 'copy')
-        writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer = imageio.get_writer(
+        writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer
+        writer = imageio.get_writer(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
-        )
+        ) # type: ignore
 
+    if thresholds_by_sec:
+        threshold_by_frame_idx = dict()
+        if 0 not in thresholds_by_sec:
+            threshold_by_frame_idx[0] = threshold
+        for t in thresholds_by_sec:
+            frame_idx = np.round(fps * t)
+            threshold_by_frame_idx[frame_idx] = thresholds_by_sec[t]
+
+    iter_idx = 0
+    frame_cache: List[Any] = []
     for frame in read_iter:
+        if not thresholds_by_sec:
+            temp_threshold = threshold
+        elif iter_idx in threshold_by_frame_idx:
+            temp_threshold = threshold_by_frame_idx[iter_idx]
+        iter_idx += 1
         # Perform network inference, get bb dets but discard landmark predictions
-        dets, _ = centerface(frame, threshold=threshold)
+        dets, _ = centerface(frame, threshold=temp_threshold)
+
+        # Make cache of the last 5 frames
+        # make overlapping groups for each time step.
+        # If a new det overlap any group in previous time step at least 2 times,
+        #  it means the detection is reliable.
+        # annonymize det that are reliable.
+        # Add a new dets to cache, remove the old frame (-6th) cache
+
+        reliables = []
+        for det in dets:
+            overlap_counter = 0
+            for step_cache in frame_cache[-5:]:
+                for group in step_cache:
+                    if has_overlap_with_group(det, group):
+                        overlap_counter += 1
+                        break
+            if overlap_counter >= overlap_threshold:
+                reliables.append(det)
+        cached_dets = np.asarray(reliables, dtype=np.float32)
+
+        # Add new dets to cache
+        cached_groups = group_det_by_overlap(dets)
+        frame_cache.append(cached_groups)
+
+        # Filter cached_dets here, make dets into group of overlapping rectangles
+        # Get the mean centeroid and max w,h and create one rectangle per group from those numbers.
+        groups = group_det_by_overlap(cached_dets)
+        new_dets = filter_dets(groups)
 
         anonymize_frame(
             dets, frame, mask_scale=mask_scale,
@@ -320,6 +432,23 @@ def parse_cli_args():
     parser.add_argument(
         '--keep-metadata', '-m', default=False, action='store_true',
         help='Keep metadata of the original image. Default : False.')
+    parser.add_argument(
+        "--thresholds_by_sec",
+        "-tbs",
+        default={},
+        type=dict,
+        metavar="TBS",
+        help="A dictionary of desired threshold by seconds (for videos only)",
+    )
+    parser.add_argument(
+        "--overlap_threshold",
+        "-ot",
+        default=2,
+        type=int,
+        metavar="OT",
+        choices=[0, 1, 2, 3, 4, 5],
+        help="The number of previous frames (videos only) the same bounding box has to appear in to consider reliable detection. Default : 2.",
+    )
     parser.add_argument('--help', '-h', action='help', help='Show this help message and exit.')
 
     args = parser.parse_args()
@@ -366,6 +495,9 @@ def main():
     mosaicsize = args.mosaicsize
     keep_metadata = args.keep_metadata
     replaceimg = None
+    thresholds_by_sec = args.thresholds_by_sec
+    overlap_threshold = args.overlap_threshold
+
     if in_shape is not None:
         w, h = in_shape.split('x')
         in_shape = int(w), int(h)
@@ -410,7 +542,9 @@ def main():
                 keep_audio=keep_audio,
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
-                mosaicsize=mosaicsize
+                mosaicsize=mosaicsize,
+                thresholds_by_sec=thresholds_by_sec,
+                overlap_threshold=overlap_threshold,
             )
         elif filetype == 'image':
             image_detect(
