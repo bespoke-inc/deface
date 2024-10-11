@@ -34,7 +34,7 @@ class TestDeface(unittest.TestCase):
 
         # A cache of previous detections, there is only 1 reliable detection
         # [100, 100, 200, 200] which appears 3 times
-        self.cache_1 = [
+        self.cache = [
             [
                 [
                     [10, 10, 20, 20, 0.2],
@@ -175,9 +175,9 @@ class TestDeface(unittest.TestCase):
 
     def test_filter_dets_by_cache(self):
         # WHEN
-        new_dets_1, _ = filter_dets_by_cache(self.dets_1, self.cache_1, 3)
-        new_dets_2, _ = filter_dets_by_cache(self.dets_2, self.cache_1, 5)
-        new_dets_3, _ = filter_dets_by_cache(self.dets_3, self.cache_1, 0)
+        new_dets_1, _ = filter_dets_by_cache(self.dets_1, self.cache.copy(), 3)
+        new_dets_2, _ = filter_dets_by_cache(self.dets_2, self.cache.copy(), 5)
+        new_dets_3, _ = filter_dets_by_cache(self.dets_3, self.cache.copy(), 0)
 
         # THEN
         self.assertEqual(
