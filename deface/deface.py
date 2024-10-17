@@ -4,7 +4,7 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple, Optional, List, Any
+from typing import Dict, Tuple, List, Any
 from ast import literal_eval
 
 import tqdm
@@ -219,19 +219,19 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
-        thresholds_by_sec: Optional[Dict[float, float]] = None,
+        thresholds_by_sec: Dict[float, float] = {},
         overlap_threshold: int = 2,
 ):
     reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader
     try:
         if 'fps' in ffmpeg_config:
-            reader = imageio.get_reader(ipath, fps=ffmpeg_config["fps"])  # type: ignore
+            reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])  # type: ignore
         else:
             reader = imageio.get_reader(ipath)  # type: ignore
 
         meta = reader.get_meta_data()
         _ = meta['size']
-        fps = meta["fps"]
+        fps = meta['fps']
     except:
         if cam:
             print(f'Could not find video device {ipath}. Please set a valid input.')
@@ -258,22 +258,21 @@ def video_detect(
         if keep_audio and meta.get('audio_codec'):
             _ffmpeg_config.setdefault('audio_path', ipath)
             _ffmpeg_config.setdefault('audio_codec', 'copy')
-        writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer
-        writer = imageio.get_writer(
+        writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer = imageio.get_writer(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         ) # type: ignore
 
-    if thresholds_by_sec:
-        threshold_by_frame_idx = dict()
-        if 0 not in thresholds_by_sec:
-            threshold_by_frame_idx[0] = threshold
-        for t in thresholds_by_sec:
-            frame_idx = np.round(fps * t)
-            threshold_by_frame_idx[frame_idx] = thresholds_by_sec[t]
+
+    threshold_by_frame_idx = dict()
+    if 0 not in thresholds_by_sec:
+        threshold_by_frame_idx[0] = threshold
+    for start_time, thresh in thresholds_by_sec.items():
+        frame_idx = np.round(fps * start_time)
+        threshold_by_frame_idx[frame_idx] = thresh
 
     iter_idx = 0
     frame_cache: List[Any] = []
-    temp_threshold = default_threshold
+    temp_threshold = threshold
     for frame in read_iter:
         if thresholds_by_sec and iter_idx in threshold_by_frame_idx:
             temp_threshold = threshold_by_frame_idx[iter_idx]
@@ -287,7 +286,7 @@ def video_detect(
         )
 
         anonymize_frame(
-            dets, frame, mask_scale=mask_scale,
+            new_dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
             replaceimg=replaceimg, mosaicsize=mosaicsize
         )
