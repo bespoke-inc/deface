@@ -19,6 +19,31 @@ from deface import __version__
 from deface.centerface import CenterFace
 
 
+class ThresholdTimeline:
+    def __init__(self, thresholds_by_sec, default_threshold, fps):
+        self.thresholds = {}
+        self.default_threshold = default_threshold
+        self.fps = fps
+
+        # Populate the thresholds dict with frame indices
+        if 0 not in thresholds_by_sec:
+            self.thresholds[0] = default_threshold
+
+        for start_time, thresh in thresholds_by_sec.items():
+            frame_idx = int(round(fps * start_time))
+            self.thresholds[frame_idx] = thresh
+
+    def threshold_for_frame(self, frame_idx):
+        # Default to the initial threshold if no change has occurred
+        threshold = self.default_threshold
+        for idx, thresh in self.thresholds.items():
+            if frame_idx >= idx:
+                threshold = thresh
+            else:
+                break
+        return threshold
+
+
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
     s = mask_scale - 1.0
     h, w = y2 - y1, x2 - x1
@@ -263,22 +288,12 @@ def video_detect(
         ) # type: ignore
 
 
-    threshold_by_frame_idx = dict()
-    if 0 not in thresholds_by_sec:
-        threshold_by_frame_idx[0] = threshold
-    for start_time, thresh in thresholds_by_sec.items():
-        frame_idx = np.round(fps * start_time)
-        threshold_by_frame_idx[frame_idx] = thresh
-
-    iter_idx = 0
+    thresholds_timeline = ThresholdTimeline(thresholds_by_sec, threshold, fps)
     frame_cache: List[Any] = []
-    temp_threshold = threshold
-    for frame in read_iter:
-        if thresholds_by_sec and iter_idx in threshold_by_frame_idx:
-            temp_threshold = threshold_by_frame_idx[iter_idx]
-        iter_idx += 1
+    for frame_idx, frame in enumerate(read_iter):
+        current_threshold = thresholds_timeline.threshold_for_frame(frame_idx)
         # Perform network inference, get bb dets but discard landmark predictions
-        dets, _ = centerface(frame, threshold=temp_threshold)
+        dets, _ = centerface(frame, threshold=current_threshold)
 
         # Use cache of the last 5 frames
         new_dets, frame_cache = filter_dets_by_cache(
