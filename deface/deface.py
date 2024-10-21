@@ -129,7 +129,6 @@ def cam_read_iter(reader):
 
 
 def has_overlap(det, other):
-    # In openCV the coordinator start at the top left corner of the image
     x1, y1, x2, y2, _ = det
     X1, Y1, X2, Y2, _ = other
     h_overlaps = (x1 <= X2) and (x2 >= X1)
@@ -143,7 +142,7 @@ def has_overlap_with_group(det, group):
 
 def group_det_by_overlap(dets):
     ordered_dets = sorted(dets, key=lambda x: (x[0], x[1]))
-    groups = [ordered_dets[0]]
+    groups = [[ordered_dets[0]]]
     # add to groups the det that have overlap with others
     for det in ordered_dets[1:]:
         if has_overlap_with_group(det, groups[-1]):
@@ -210,16 +209,17 @@ def filter_dets_by_cache(dets, cache, overlap_threshold):
             reliables.append(det)
     cached_dets = np.asarray(reliables, dtype=np.float32)
 
-    # Add new dets to cache
-    cached_groups = group_det_by_overlap(dets)
-    cache.append(cached_groups)
+    if cached_dets.any():
+        # Add new dets to cache
+        cached_groups = group_det_by_overlap(dets)
+        cache.append(cached_groups)
 
-    # Filter cached_dets here, make detections into group of overlapping rectangles
-    groups = group_det_by_overlap(cached_dets)
-    # Get the weighted average centeroid and max w,h and create one rectangle per group from those numbers.
-    new_dets = get_group_centeroid(groups)
-
-    return new_dets, cache
+        # Filter cached_dets here, make detections into group of overlapping rectangles
+        groups = group_det_by_overlap(cached_dets)
+        # Get the weighted average centeroid and max w,h and create one rectangle per group from those numbers.
+        new_dets = get_group_centeroid(groups)
+        return new_dets, cache
+    return cached_dets, cache
 
 
 def video_detect(
@@ -244,9 +244,9 @@ def video_detect(
     reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader
     try:
         if 'fps' in ffmpeg_config:
-            reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])  # type: ignore
+            reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])
         else:
-            reader = imageio.get_reader(ipath)  # type: ignore
+            reader = imageio.get_reader(ipath)
 
         meta = reader.get_meta_data()
         _ = meta['size']
@@ -279,7 +279,7 @@ def video_detect(
             _ffmpeg_config.setdefault('audio_codec', 'copy')
         writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer = imageio.get_writer(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
-        ) # type: ignore
+        )
 
 
     thresholds_timeline = ThresholdTimeline(thresholds_by_sec, threshold, fps)
