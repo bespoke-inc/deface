@@ -145,13 +145,10 @@ def has_overlap_with_group(det, group):
 
 
 def group_det_by_overlap(dets):
-    groups = [[]]
     ordered_dets = sorted(dets, key=lambda x: (x[0], x[1]))
+    groups = [ordered_dets[0]]
     # add to groups the det that have overlap with others
-    for det in ordered_dets:
-        if not groups[-1]:
-            groups[-1].append(det)
-            continue
+    for det in ordered_dets[1:]:
         if has_overlap_with_group(det, groups[-1]):
             groups[-1].append(det)
         else:
