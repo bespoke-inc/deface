@@ -138,10 +138,7 @@ def has_overlap(det, other):
 
 
 def has_overlap_with_group(det, group):
-    for other in group:
-        if has_overlap(det, other):
-            return True
-    return False
+    return any(has_overlap(det, other) for other in group)
 
 
 def group_det_by_overlap(dets):
