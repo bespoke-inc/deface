@@ -3,10 +3,10 @@ import numpy as np
 
 from deface.deface import (
     has_overlap,
-    has_overlap_with_group,
-    group_det_by_overlap,
-    get_group_centeroid,
-    filter_dets_by_cache,
+    has_overlap_with_union,
+    unionize_overlapping_dets,
+    get_union_rep,
+    filter_by_dets_history,
 )
 
 
@@ -32,9 +32,9 @@ class TestDeface(unittest.TestCase):
             [50, 50, 200, 200, 0.25],
         ]
 
-        # A cache of previous detections, there is only 1 reliable detection
+        # A history of previous detections, there is only 1 reliable detection
         # [100, 100, 200, 200] which appears 3 times
-        self.cache = [
+        self.history = [
             [
                 [
                     [10, 10, 20, 20, 0.2],
@@ -103,40 +103,40 @@ class TestDeface(unittest.TestCase):
         self.assertEqual(is_overlapped_3_2, True, "incorrect overlap assertion")
         self.assertEqual(is_overlapped_3_3, True, "incorrect overlap assertion")
 
-    def test_has_overlap_with_group(self):
+    def test_has_overlap_with_union(self):
         # GIVEN
         test_dets = [400, 400, 600, 600, 0.5]
 
         # WHEN
-        is_overlapped_1 = has_overlap_with_group(test_dets, self.dets_1)
-        is_overlapped_2 = has_overlap_with_group(test_dets, self.dets_2)
-        is_overlapped_3 = has_overlap_with_group(test_dets, self.dets_3)
+        is_overlapped_1 = has_overlap_with_union(test_dets, self.dets_1)
+        is_overlapped_2 = has_overlap_with_union(test_dets, self.dets_2)
+        is_overlapped_3 = has_overlap_with_union(test_dets, self.dets_3)
 
         # THEN
         self.assertEqual(is_overlapped_1, True, "incorrect overlap assertion")
         self.assertEqual(is_overlapped_2, True, "incorrect overlap assertion")
         self.assertEqual(is_overlapped_3, False, "incorrect overlap assertion")
 
-    def test_group_det_by_overlap(self):
+    def test_unionize_overlapping_dets(self):
         # WHEN
-        groups_1 = group_det_by_overlap(self.dets_1)
-        groups_2 = group_det_by_overlap(self.dets_2)
-        groups_3 = group_det_by_overlap(self.dets_3)
+        groups_1 = unionize_overlapping_dets(self.dets_1)
+        groups_2 = unionize_overlapping_dets(self.dets_2)
+        groups_3 = unionize_overlapping_dets(self.dets_3)
 
         # THEN
         self.assertEqual(len(groups_1), 2, "incorrect number of groups")
         self.assertEqual(len(groups_2), 3, "incorrect number of groups")
         self.assertEqual(len(groups_3), 1, "incorrect number of groups")
 
-    def test_get_group_centeroid(self):
+    def test_get_union_rep(self):
         # WHEN
-        groups_1 = group_det_by_overlap(self.dets_1)
-        groups_2 = group_det_by_overlap(self.dets_2)
-        groups_3 = group_det_by_overlap(self.dets_3)
+        groups_1 = unionize_overlapping_dets(self.dets_1)
+        groups_2 = unionize_overlapping_dets(self.dets_2)
+        groups_3 = unionize_overlapping_dets(self.dets_3)
 
-        centeroid_1 = get_group_centeroid(groups_1)
-        centeroid_2 = get_group_centeroid(groups_2)
-        centeroid_3 = get_group_centeroid(groups_3)
+        centeroid_1 = get_union_rep(groups_1)
+        centeroid_2 = get_union_rep(groups_2)
+        centeroid_3 = get_union_rep(groups_3)
 
         # THEN
         self.assertTrue(
@@ -173,11 +173,11 @@ class TestDeface(unittest.TestCase):
             "incorrect centeroid calculation",
         )
 
-    def test_filter_dets_by_cache(self):
+    def test_filter_by_dets_history(self):
         # WHEN
-        new_dets_1, _ = filter_dets_by_cache(self.dets_1, self.cache.copy(), 3)
-        new_dets_2, _ = filter_dets_by_cache(self.dets_2, self.cache.copy(), 5)
-        new_dets_3, _ = filter_dets_by_cache(self.dets_3, self.cache.copy(), 0)
+        new_dets_1, _ = filter_by_dets_history(self.dets_1, self.history.copy(), 3)
+        new_dets_2, _ = filter_by_dets_history(self.dets_2, self.history.copy(), 5)
+        new_dets_3, _ = filter_by_dets_history(self.dets_3, self.history.copy(), 0)
 
         # THEN
         self.assertEqual(
@@ -187,5 +187,5 @@ class TestDeface(unittest.TestCase):
             len(new_dets_2), 0, "incorrect number of detection after filtering"
         )
         self.assertEqual(
-            len(new_dets_3), 1, "incorrect number of detection after filteringn"
+            len(new_dets_3), 1, "incorrect number of detection after filtering"
         )

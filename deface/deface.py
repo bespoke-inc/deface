@@ -136,36 +136,36 @@ def has_overlap(det, other):
     return h_overlaps and v_overlaps
 
 
-def has_overlap_with_group(det, group):
-    return any(has_overlap(det, other) for other in group)
+def has_overlap_with_union(det, union):
+    return any(has_overlap(det, other) for other in union)
 
 
-def group_det_by_overlap(dets):
+def unionize_overlapping_dets(dets):
     ordered_dets = sorted(dets, key=lambda x: (x[0], x[1]))
-    groups = [[ordered_dets[0]]]
-    # add to groups the det that have overlap with others
+    unions = [[ordered_dets[0]]]
+    # add to unions the det that have overlap with others
     for det in ordered_dets[1:]:
-        if has_overlap_with_group(det, groups[-1]):
-            groups[-1].append(det)
+        if has_overlap_with_union(det, unions[-1]):
+            unions[-1].append(det)
         else:
-            groups.append([det])
-    return groups
+            unions.append([det])
+    return unions
 
 
-def get_group_centeroid(groups):
-    new_dets = []
-    # The box of a group has centroid of weighted average centroids (by area) and
-    # and the width, height and score are the max of all boxes in the group
-    for group in groups:
-        if not group:
+def get_union_rep(unions):
+    union_reps = []
+    # The representative of a union has centroid of weighted average centroids (by area) and
+    # and the width, height and score are the max of all detections in the union
+    for union in unions:
+        if not union:
             continue
-        elif len(group) == 1:
-            new_dets.append(group[0])
+        elif len(union) == 1:
+            union_reps.append(union[0])
         else:
-            x1s = [x[0] for x in group]
-            y1s = [x[1] for x in group]
-            x2s = [x[2] for x in group]
-            y2s = [x[3] for x in group]
+            x1s = [x[0] for x in union]
+            y1s = [x[1] for x in union]
+            x2s = [x[2] for x in union]
+            y2s = [x[3] for x in union]
 
             widths = [x2 - x1 for x2, x1 in zip(x2s, x1s)]
             heights = [y2 - y1 for y2, y1 in zip(y2s, y1s)]
@@ -176,50 +176,47 @@ def get_group_centeroid(groups):
 
             x_centroids = [np.rint((x1 + x2) / 2) for x1, x2 in zip(x1s, x2s)]
             y_centroids = [np.rint((y1 + y2) / 2) for y1, y2 in zip(y1s, y2s)]
-            group_x_centroid = np.average(x_centroids, weights=areas)
-            group_y_centroid = np.average(y_centroids, weights=areas)
+            union_x_centroid = np.average(x_centroids, weights=areas)
+            union_y_centroid = np.average(y_centroids, weights=areas)
 
-            group_x1 = max([min(x1s), np.floor(group_x_centroid - max_w / 2)])
-            group_y1 = max([min(y1s), np.floor(group_y_centroid - max_h / 2)])
-            group_x2 = min([max(x2s), np.floor(group_x_centroid + max_w / 2)])
-            group_y2 = min([max(y2s), np.floor(group_y_centroid + max_h / 2)])
-            group_score = max([x[4] for x in group])
+            union_x1 = max([min(x1s), np.floor(union_x_centroid - max_w / 2)])
+            union_y1 = max([min(y1s), np.floor(union_y_centroid - max_h / 2)])
+            union_x2 = min([max(x2s), np.floor(union_x_centroid + max_w / 2)])
+            union_y2 = min([max(y2s), np.floor(union_y_centroid + max_h / 2)])
+            union_score = max([x[4] for x in union])
 
-            new_dets.append([group_x1, group_y1, group_x2, group_y2, group_score])
-    return np.asarray(new_dets, dtype=np.float32)
+            union_reps.append([union_x1, union_y1, union_x2, union_y2, union_score])
+    return np.asarray(union_reps, dtype=np.float32)
 
 
-def filter_dets_by_cache(dets, cache, overlap_threshold):
-    # Make cache of the last frames
-    # make overlapping groups for each time step.
-    # If a new detection overlap any group in previous time step at least overlap_threshold times,
+def filter_by_dets_history(dets, history, consistency_threshold):
+    # Using a history of previous detections to assert the reliability of the new detections
+    # If a new detection consistently overlap previous detections consistency_threshold times,
     #  it means the detection is reliable.
-    # annonymize the detections that are reliable.
-    # Add a new detection to cache
+    # Add any new detection to the history
 
     reliables = []
     for det in dets:
         overlap_counter = 0
-        for step_cache in cache:
-            for group in step_cache:
-                if has_overlap_with_group(det, group):
+        for generation in history:
+            for union in generation:
+                if has_overlap_with_union(det, union):
                     overlap_counter += 1
                     break
-        if overlap_counter >= overlap_threshold:
+        if overlap_counter >= consistency_threshold:
             reliables.append(det)
-    cached_dets = np.asarray(reliables, dtype=np.float32)
 
-    if cached_dets.any():
-        # Add new dets to cache
-        cached_groups = group_det_by_overlap(dets)
-        cache.append(cached_groups)
+    if reliables:
+        # Add new dets to history
+        new_unions = unionize_overlapping_dets(dets)
+        history.append(new_unions)
 
-        # Filter cached_dets here, make detections into group of overlapping rectangles
-        groups = group_det_by_overlap(cached_dets)
-        # Get the weighted average centeroid and max w,h and create one rectangle per group from those numbers.
-        new_dets = get_group_centeroid(groups)
-        return new_dets, cache
-    return cached_dets, cache
+        # Create unions of reliable detections
+        reliable_unions = unionize_overlapping_dets(reliables)
+        # Get the weighted average centeroid and max w,h and create a representative rectangle per union from those numbers.
+        rep_dets = get_union_rep(reliable_unions)
+        return rep_dets, history
+    return np.array([]), history
 
 
 def video_detect(
@@ -239,7 +236,7 @@ def video_detect(
         keep_audio: bool = False,
         mosaicsize: int = 20,
         thresholds_by_sec: Dict[float, float] = {},
-        overlap_threshold: int = 2,
+        consistency_threshold: int = 2,
 ):
     reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader
     try:
@@ -283,19 +280,20 @@ def video_detect(
 
 
     thresholds_timeline = ThresholdTimeline(thresholds_by_sec, threshold, fps)
-    frame_cache: List[Any] = []
+    detections_history: List[Any] = []
     for frame_idx, frame in enumerate(read_iter):
         current_threshold = thresholds_timeline.threshold_for_frame(frame_idx)
         # Perform network inference, get bb dets but discard landmark predictions
         dets, _ = centerface(frame, threshold=current_threshold)
 
-        # Use cache of the last 5 frames
-        new_dets, frame_cache = filter_dets_by_cache(
-            dets, frame_cache[-5:], overlap_threshold
+        # Use cache of the last 5 frames to get reliable detections
+        reliable_dets, detections_history = filter_dets_by_cache(
+            dets, detections_history[-5:], consistency_threshold
         )
 
+        # Annonymize the detections that are reliable
         anonymize_frame(
-            new_dets, frame, mask_scale=mask_scale,
+            reliable_dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
             replaceimg=replaceimg, mosaicsize=mosaicsize
         )
@@ -461,11 +459,11 @@ def parse_cli_args():
         help="A json string (dictionary) of desired threshold by seconds (for videos only). i.e: '{1: 0.5, 5: 0.7}'",
     )
     parser.add_argument(
-        "--overlap_threshold",
-        "-ot",
+        "--consistency_threshold",
+        "-ct",
         default=2,
         type=int,
-        metavar="OT",
+        metavar="CT",
         choices=[0, 1, 2, 3, 4, 5],
         help="The number of previous frames (videos only) the same bounding box has to appear in to consider reliable detection. Default : 2.",
     )
@@ -515,7 +513,7 @@ def main():
     keep_metadata = args.keep_metadata
     replaceimg = None
     thresholds_by_sec = literal_eval(args.thresholds_by_sec)
-    overlap_threshold = args.overlap_threshold
+    consistency_threshold = args.consistency_threshold
 
     if in_shape is not None:
         w, h = in_shape.split('x')
@@ -563,7 +561,7 @@ def main():
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
                 thresholds_by_sec=thresholds_by_sec,
-                overlap_threshold=overlap_threshold,
+                consistency_threshold=consistency_threshold,
             )
         elif filetype == 'image':
             image_detect(
