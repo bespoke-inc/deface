@@ -194,28 +194,27 @@ def filter_by_dets_history(dets, history, consistency_threshold):
     # If a new detection consistently overlap previous detections consistency_threshold times,
     #  it means the detection is reliable.
     # Add any new detection to the history
+    if dets.any():
+        reliables = []
+        for det in dets:
+            overlap_counter = 0
+            for generation in history:
+                for union in generation:
+                    if has_overlap_with_union(det, union):
+                        overlap_counter += 1
+                        break
+            if overlap_counter >= consistency_threshold:
+                reliables.append(det)
 
-    reliables = []
-    for det in dets:
-        overlap_counter = 0
-        for generation in history:
-            for union in generation:
-                if has_overlap_with_union(det, union):
-                    overlap_counter += 1
-                    break
-        if overlap_counter >= consistency_threshold:
-            reliables.append(det)
-
-    if reliables:
-        # Add new dets to history
+        # Always add unionized new detections to history
         new_unions = unionize_overlapping_dets(dets)
         history.append(new_unions)
-
-        # Create unions of reliable detections
-        reliable_unions = unionize_overlapping_dets(reliables)
-        # Get the weighted average centeroid and max w,h and create a representative rectangle per union from those numbers.
-        rep_dets = get_union_rep(reliable_unions)
-        return rep_dets, history
+        if reliables:
+            # Create unions of reliable detections
+            reliable_unions = unionize_overlapping_dets(reliables)
+            # Get the weighted average centeroid and max w,h and create a representative rectangle per union from those numbers.
+            rep_dets = get_union_rep(reliable_unions)
+            return rep_dets, history
     return np.array([]), history
 
 
@@ -287,7 +286,7 @@ def video_detect(
         dets, _ = centerface(frame, threshold=current_threshold)
 
         # Use cache of the last 5 frames to get reliable detections
-        reliable_dets, detections_history = filter_dets_by_cache(
+        reliable_dets, detections_history = filter_by_dets_history(
             dets, detections_history[-5:], consistency_threshold
         )
 
