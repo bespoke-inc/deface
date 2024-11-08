@@ -4,7 +4,8 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Any
+from ast import literal_eval
 
 import tqdm
 import skimage.draw
@@ -16,6 +17,31 @@ import cv2
 
 from deface import __version__
 from deface.centerface import CenterFace
+
+
+class ThresholdTimeline:
+    def __init__(self, thresholds_by_sec, default_threshold, fps):
+        self.thresholds = {}
+        self.default_threshold = default_threshold
+        self.fps = fps
+
+        # Populate the thresholds dict with frame indices
+        if 0 not in thresholds_by_sec:
+            self.thresholds[0] = default_threshold
+
+        for start_time, thresh in thresholds_by_sec.items():
+            frame_idx = int(round(fps * start_time))
+            self.thresholds[frame_idx] = thresh
+
+    def threshold_for_frame(self, frame_idx):
+        # Default to the initial threshold if no change has occurred
+        threshold = self.default_threshold
+        for idx, thresh in self.thresholds.items():
+            if frame_idx >= idx:
+                threshold = thresh
+            else:
+                break
+        return threshold
 
 
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
@@ -102,6 +128,96 @@ def cam_read_iter(reader):
         yield reader.get_next_data()
 
 
+def has_overlap(det, other):
+    x1, y1, x2, y2, _ = det
+    X1, Y1, X2, Y2, _ = other
+    h_overlaps = (x1 <= X2) and (x2 >= X1)
+    v_overlaps = (y1 <= Y2) and (y2 >= Y1)
+    return h_overlaps and v_overlaps
+
+
+def has_overlap_with_union(det, union):
+    return any(has_overlap(det, other) for other in union)
+
+
+def unionize_overlapping_dets(dets):
+    ordered_dets = sorted(dets, key=lambda x: (x[0], x[1]))
+    unions = [[ordered_dets[0]]]
+    # add to unions the det that have overlap with others
+    for det in ordered_dets[1:]:
+        if has_overlap_with_union(det, unions[-1]):
+            unions[-1].append(det)
+        else:
+            unions.append([det])
+    return unions
+
+
+def get_union_rep(unions):
+    union_reps = []
+    # The representative of a union has centroid of weighted average centroids (by area) and
+    # and the width, height and score are the max of all detections in the union
+    for union in unions:
+        if not union:
+            continue
+        elif len(union) == 1:
+            union_reps.append(union[0])
+        else:
+            x1s = [x[0] for x in union]
+            y1s = [x[1] for x in union]
+            x2s = [x[2] for x in union]
+            y2s = [x[3] for x in union]
+
+            widths = [x2 - x1 for x2, x1 in zip(x2s, x1s)]
+            heights = [y2 - y1 for y2, y1 in zip(y2s, y1s)]
+
+            areas = [w * h for w, h in zip(widths, heights)]
+            max_w = max(widths)
+            max_h = max(heights)
+
+            x_centroids = [np.rint((x1 + x2) / 2) for x1, x2 in zip(x1s, x2s)]
+            y_centroids = [np.rint((y1 + y2) / 2) for y1, y2 in zip(y1s, y2s)]
+            union_x_centroid = np.average(x_centroids, weights=areas)
+            union_y_centroid = np.average(y_centroids, weights=areas)
+
+            union_x1 = max([min(x1s), np.floor(union_x_centroid - max_w / 2)])
+            union_y1 = max([min(y1s), np.floor(union_y_centroid - max_h / 2)])
+            union_x2 = min([max(x2s), np.floor(union_x_centroid + max_w / 2)])
+            union_y2 = min([max(y2s), np.floor(union_y_centroid + max_h / 2)])
+            union_score = max([x[4] for x in union])
+
+            union_reps.append([union_x1, union_y1, union_x2, union_y2, union_score])
+    return np.asarray(union_reps, dtype=np.float32)
+
+
+def filter_by_dets_history(dets, history, consistency_threshold):
+    # Using a history of previous detections to assert the reliability of the new detections
+    # If a new detection consistently overlap previous detections consistency_threshold times,
+    #  it means the detection is reliable.
+    # Add any new detection to the history
+    if dets.any():
+        reliables = []
+        for det in dets:
+            overlap_counter = 0
+            for generation in history:
+                for union in generation:
+                    if has_overlap_with_union(det, union):
+                        overlap_counter += 1
+                        break
+            if overlap_counter >= consistency_threshold:
+                reliables.append(det)
+
+        # Always add unionized new detections to history
+        new_unions = unionize_overlapping_dets(dets)
+        history.append(new_unions)
+        if reliables:
+            # Create unions of reliable detections
+            reliable_unions = unionize_overlapping_dets(reliables)
+            # Get the weighted average centeroid and max w,h and create a representative rectangle per union from those numbers.
+            rep_dets = get_union_rep(reliable_unions)
+            return rep_dets, history
+    return np.array([]), history
+
+
 def video_detect(
         ipath: str,
         opath: str,
@@ -118,15 +234,19 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
+        thresholds_by_sec: Dict[float, float] = {},
+        consistency_threshold: int = 2,
 ):
+    reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader
     try:
         if 'fps' in ffmpeg_config:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])
+            reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])
         else:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath)
+            reader = imageio.get_reader(ipath)
 
         meta = reader.get_meta_data()
         _ = meta['size']
+        fps = meta['fps']
     except:
         if cam:
             print(f'Could not find video device {ipath}. Please set a valid input.')
@@ -157,12 +277,22 @@ def video_detect(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         )
 
-    for frame in read_iter:
-        # Perform network inference, get bb dets but discard landmark predictions
-        dets, _ = centerface(frame, threshold=threshold)
 
+    thresholds_timeline = ThresholdTimeline(thresholds_by_sec, threshold, fps)
+    detections_history: List[Any] = []
+    for frame_idx, frame in enumerate(read_iter):
+        current_threshold = thresholds_timeline.threshold_for_frame(frame_idx)
+        # Perform network inference, get bb dets but discard landmark predictions
+        dets, _ = centerface(frame, threshold=current_threshold)
+
+        # Use cache of the last 5 frames to get reliable detections
+        reliable_dets, detections_history = filter_by_dets_history(
+            dets, detections_history[-5:], consistency_threshold
+        )
+
+        # Annonymize the detections that are reliable
         anonymize_frame(
-            dets, frame, mask_scale=mask_scale,
+            reliable_dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
             replaceimg=replaceimg, mosaicsize=mosaicsize
         )
@@ -320,6 +450,22 @@ def parse_cli_args():
     parser.add_argument(
         '--keep-metadata', '-m', default=False, action='store_true',
         help='Keep metadata of the original image. Default : False.')
+    parser.add_argument(
+        "--thresholds_by_sec",
+        "-tbs",
+        default="{}",
+        metavar="TBS",
+        help="A json string (dictionary) of desired threshold by seconds (for videos only). i.e: '{1: 0.5, 5: 0.7}'",
+    )
+    parser.add_argument(
+        "--consistency_threshold",
+        "-ct",
+        default=2,
+        type=int,
+        metavar="CT",
+        choices=[0, 1, 2, 3, 4, 5],
+        help="The number of previous frames (videos only) the same bounding box has to appear in to consider reliable detection. Default : 2.",
+    )
     parser.add_argument('--help', '-h', action='help', help='Show this help message and exit.')
 
     args = parser.parse_args()
@@ -350,7 +496,6 @@ def main():
             # or an invalid path. The latter two cases are handled below.
             ipaths.append(path)
 
-    
     base_opath = args.output
     replacewith = args.replacewith
     enable_preview = args.preview
@@ -366,6 +511,9 @@ def main():
     mosaicsize = args.mosaicsize
     keep_metadata = args.keep_metadata
     replaceimg = None
+    thresholds_by_sec = literal_eval(args.thresholds_by_sec)
+    consistency_threshold = args.consistency_threshold
+
     if in_shape is not None:
         w, h = in_shape.split('x')
         in_shape = int(w), int(h)
@@ -410,7 +558,9 @@ def main():
                 keep_audio=keep_audio,
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
-                mosaicsize=mosaicsize
+                mosaicsize=mosaicsize,
+                thresholds_by_sec=thresholds_by_sec,
+                consistency_threshold=consistency_threshold,
             )
         elif filetype == 'image':
             image_detect(
