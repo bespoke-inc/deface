@@ -139,11 +139,11 @@ class TestDeface(unittest.TestCase):
     def test_filter_by_dets_history(self):
         # GIVEN
         # new detection that also appears 3 times before
-        new_dets_1 = [[100, 105, 200, 205, 0.5]]
+        new_dets_1 = np.array([[100, 105, 200, 205, 0.5]], dtype=np.float32)
         # new detection that  appears 2 times before
-        new_dets_2 = [[10, 10, 20, 20, 0.5]]
+        new_dets_2 = np.array([[10, 10, 20, 20, 0.5]], dtype=np.float32)
         # new detection that never appears before
-        new_dets_3 = [[1000, 1000, 2000, 2000, 0.5]]
+        new_dets_3 = np.array([[1000, 1000, 2000, 2000, 0.5]], dtype=np.float32)
 
 
         # A history of previous detections,
